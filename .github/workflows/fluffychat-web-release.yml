@@ -3,7 +3,7 @@ name: Build latest FluffyChat web release
 on:
   workflow_dispatch:
   schedule:
-    # GitHub cron 默认是 UTC。这里是每天 03:17 UTC 检查一次。
+    # UTC 时间。每天检查一次最新正式 release。
     - cron: "17 3 * * *"
 
 permissions:
@@ -18,8 +18,8 @@ env:
   DEPLOY_BRANCH: web
   DEFAULT_HOMESERVER: opensuse.org
 
-  # 如果你用 GitHub Pages 的 project page，例如 https://USER.github.io/REPO/
-  # 通常要改成 "/REPO/"。如果是自定义域名或站点根路径，保持 "/"。
+  # GitHub Pages project site 通常要改成 "/你的仓库名/"
+  # 自定义域名或根路径部署保持 "/"
   BASE_HREF: /
 
 jobs:
@@ -66,17 +66,46 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip jq yq
+          sudo apt-get install -y curl unzip jq
 
       - name: Set up Rust nightly
         run: |
           rustup toolchain install nightly --profile minimal --component rust-src
           rustup default nightly
+          rustup target add wasm32-unknown-unknown --toolchain nightly
+
+      - name: Read Flutter version from FluffyChat
+        id: flutter-version
+        working-directory: fluffychat
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version_file = Path(".tool_versions.yaml")
+
+          if not version_file.exists():
+              raise SystemExit(".tool_versions.yaml not found")
+
+          text = version_file.read_text(encoding="utf-8")
+          match = re.search(r"\bflutter:\s*([0-9][^\s#]+)", text)
+
+          if not match:
+              raise SystemExit("Could not find Flutter version in .tool_versions.yaml")
+
+          version = match.group(1).strip()
+          print(f"Flutter version: {version}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"version={version}\n")
+          PY
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version-file: fluffychat/.tool_versions.yaml
+          channel: any
+          flutter-version: ${{ steps.flutter-version.outputs.version }}
           cache: true
 
       - name: Prepare FluffyChat web dependencies

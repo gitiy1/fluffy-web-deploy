@@ -1,0 +1,118 @@
+name: Build latest FluffyChat web release
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub cron 默认是 UTC。这里是每天 03:17 UTC 检查一次。
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fluffychat-web-release
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_REPO: krille-chan/fluffychat
+  DEPLOY_BRANCH: web
+  DEFAULT_HOMESERVER: opensuse.org
+
+  # 如果你用 GitHub Pages 的 project page，例如 https://USER.github.io/REPO/
+  # 通常要改成 "/REPO/"。如果是自定义域名或站点根路径，保持 "/"。
+  BASE_HREF: /
+
+jobs:
+  check-release:
+    name: Check latest upstream release
+    runs-on: ubuntu-latest
+
+    outputs:
+      latest_tag: ${{ steps.check.outputs.latest_tag }}
+      latest_name: ${{ steps.check.outputs.latest_name }}
+      deployed_tag: ${{ steps.check.outputs.deployed_tag }}
+      should_build: ${{ steps.check.outputs.should_build }}
+
+    steps:
+      - name: Checkout automation repo
+        uses: actions/checkout@v4
+
+      - name: Check upstream latest release
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+          TARGET_REPO: ${{ github.repository }}
+          DEPLOY_BRANCH: ${{ env.DEPLOY_BRANCH }}
+          MARKER_FILE: .fluffychat-release-tag
+        run: python3 .github/scripts/check_fluffychat_release.py
+
+  build-and-publish:
+    name: Build and publish web branch
+    needs: check-release
+    if: needs.check-release.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout FluffyChat release
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.check-release.outputs.latest_tag }}
+          path: fluffychat
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl unzip jq yq
+
+      - name: Set up Rust nightly
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup default nightly
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: fluffychat/.tool_versions.yaml
+          cache: true
+
+      - name: Prepare FluffyChat web dependencies
+        working-directory: fluffychat
+        run: |
+          ./scripts/prepare-web.sh
+          rm -f ./assets/vodozemac/.gitignore
+          flutter pub get
+
+      - name: Build FluffyChat web
+        working-directory: fluffychat
+        run: |
+          flutter build web \
+            --dart-define=FLUTTER_WEB_CANVASKIT_URL=canvaskit/ \
+            --release \
+            --source-maps \
+            --base-href "${BASE_HREF}"
+
+      - name: Write config and release marker
+        working-directory: fluffychat
+        run: |
+          cat > build/web/config.json <<EOF
+          {
+            "defaultHomeserver": "${DEFAULT_HOMESERVER}"
+          }
+          EOF
+
+          printf '%s\n' '${{ needs.check-release.outputs.latest_tag }}' > build/web/.fluffychat-release-tag
+
+      - name: Publish to web branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: fluffychat/build/web
+          publish_branch: ${{ env.DEPLOY_BRANCH }}
+          force_orphan: true
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
+          commit_message: Deploy FluffyChat ${{ needs.check-release.outputs.latest_tag }} web
